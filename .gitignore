@@ -22,3 +22,6 @@ results/**/preds/
 
 # Root-level logs
 /*.log
+
+# Rendered dataset images (Cityscapes/RTTS licences forbid redistribution)
+results/inspect/
