@@ -1,0 +1,77 @@
+{
+  "source_dataset": "D:\\final thesis 5.0\\Ultimate_Fog_Dataset.zip",
+  "rtts_xml": "D:\\final thesis 5.0\\RTTS\\Annotations",
+  "images_used": 13217,
+  "images_by_source_and_split": {
+    "city/dev": 807,
+    "city/train": 8088,
+    "rtts/dev": 441,
+    "rtts/train": 3881
+  },
+  "boxes_by_split_and_class": {
+    "train": {
+      "person": 63610,
+      "car": 98034,
+      "motorcycle": 3111,
+      "bicycle": 10636,
+      "bus": 3408
+    },
+    "dev": {
+      "person": 6868,
+      "bus": 328,
+      "bicycle": 1048,
+      "car": 9823,
+      "motorcycle": 332
+    }
+  },
+  "boxes_total": 197198,
+  "box_width_at_640": {
+    "median": 20.0,
+    "pct_below_8px": 16.75,
+    "pct_below_12px": 30.64
+  },
+  "scenes": 7297,
+  "scenes_in_both_original_folders": 1432,
+  "visibility": {
+    "computed": true,
+    "scenes_fitted": 2965,
+    "fit_residual_median": 0.0032868743904053152,
+    "max_fit_residual_accepted": 0.05,
+    "by_beta": {
+      "0.005": {
+        "boxes": 51994,
+        "median_t": 0.8013885806014764,
+        "pct_t_below_0.05": 0.0,
+        "pct_t_below_0.1": 0.0,
+        "pct_t_below_0.2": 0.01
+      },
+      "0.01": {
+        "boxes": 51994,
+        "median_t": 0.6422236571449471,
+        "pct_t_below_0.05": 0.03,
+        "pct_t_below_0.1": 0.38,
+        "pct_t_below_0.2": 2.46
+      },
+      "0.02": {
+        "boxes": 51994,
+        "median_t": 0.4124512258647012,
+        "pct_t_below_0.05": 3.17,
+        "pct_t_below_0.1": 7.93,
+        "pct_t_below_0.2": 20.59
+      }
+    }
+  },
+  "counters": {
+    "boxes_below_min_px": 173,
+    "boxes_clamped": 1773,
+    "duplicate_boxes_removed": 726,
+    "excluded_bbox_overlay": 10,
+    "excluded_no_label_anywhere": 30,
+    "label_source:city_exact": 2965,
+    "label_source:city_sibling_other_folder (lost by old lookup)": 1918,
+    "label_source:city_sibling_same_folder": 4012,
+    "label_source:rtts_xml": 4322,
+    "rtts_xml_size_mismatch": 4
+  },
+  "split_rule": "scene-level, dev if md5('scene:'+scene) fraction < 0.1"
+}
