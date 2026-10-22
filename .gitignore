@@ -1,0 +1,24 @@
+# Large or derived: never commit
+data/*
+!data/audit.json
+smoke/
+*.pt
+*.cache
+__pycache__/
+*.pyc
+.venv/
+
+# Runs: keep only the small records needed to regenerate tables
+runs/**
+!runs/**/
+!runs/**/config.json
+!runs/**/gen*_labels.json
+!runs/**/train.log
+!runs/**/results.csv
+runs/**/data/**
+
+# Results: keep metrics and tables, not cached predictions
+results/**/preds/
+
+# Root-level logs
+/*.log

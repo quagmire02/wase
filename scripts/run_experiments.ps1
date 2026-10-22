@@ -1,0 +1,52 @@
+# Every run in PLAN.md section 6, in the order of section 7.
+# Each block is safe to re-run: finished generations are skipped.
+# Stop at the gates and read the results before continuing.
+#
+#   powershell -ExecutionPolicy Bypass -File scripts\run_experiments.ps1 -Block week2
+param([Parameter(Mandatory = $true)]
+      [ValidateSet("prep", "week2", "blockA", "q1", "seeds", "q2", "optional")] [string]$Block,
+      [string]$AcdcGt = $env:ACDC_FOG_VAL_GT, [string]$AcdcImg = $env:ACDC_FOG_VAL_IMG)
+$ErrorActionPreference = "Stop"
+$py = if ($env:WASE_PYTHON) { $env:WASE_PYTHON } else { "python" }
+function T([string[]]$a) { & $py -m wase.train @a; if ($LASTEXITCODE) { throw "train failed: $a" } }
+
+switch ($Block) {
+  "prep"   { & $py -m wase.selftest; & $py -m wase.prep }
+
+  # Gate 1: compare these two on ACDC fog val before going further
+  "week2"  { T "--condition", "naive", "--seed", "0"
+             T "--condition", "supervised", "--seed", "0" }
+
+  # Gate A: mechanism studies, no training
+  "blockA" { if (-not $AcdcGt) { throw "set -AcdcGt / -AcdcImg (ACDC fog val)" }
+             $G = @("--gt", $AcdcGt, "--img-root", $AcdcImg)
+             foreach ($t in @(@("coco", "..\yolov8n.pt"), @("naive", "runs\naive\seed0\weights\final.pt"))) {
+               & $py -m wase.diagnose scale     @G --weights $t[1] --tag $t[0]
+               & $py -m wase.diagnose selection @G --weights $t[1] --tag $t[0] }
+             & $py -m wase.diagnose calibration @G --tag acdc --models coco=..\yolov8n.pt `
+                 naive=runs\naive\seed0\weights\final.pt supervised=runs\supervised\seed0\weights\final.pt
+             & $py -m wase.diagnose agreement --split train --tag coco_gen0 }
+
+  # Q1 mechanism runs (1 seed each)
+  "q1"     { T "--condition", "supervised", "--label-filter", "visibility", "--tau", "0.1"
+             T "--condition", "supervised", "--label-filter", "size", "--min-px", "12"
+             T "--condition", "supervised", "--label-filter", "teacher"
+             T "--condition", "supervised", "--source", "rtts"
+             T "--condition", "supervised", "--source", "city"
+             T "--condition", "supervised", "--lr-scale", "0.1"
+             T "--condition", "supervised", "--imgsz", "1024"
+             foreach ($f in "0.1", "0.25", "0.5") { T "--condition", "supervised", "--fraction", $f }
+             T "--condition", "naive", "--generations", "1", "--epochs", "120" }
+
+  # Extra seeds for the primary comparisons
+  "seeds"  { foreach ($s in 1, 2) { foreach ($c in "naive", "supervised", "crop-dqs", "inplace-dqs") {
+               T "--condition", $c, "--seed", "$s" } } }
+
+  # Q2 refinement, trimmed (seed 0; seeds 1-2 come from the "seeds" block)
+  "q2"     { foreach ($c in "crop-dqs", "inplace-dqs", "rawflip-wbf", "global-dcp") { T "--condition", $c, "--seed", "0" } }
+
+  # Only if time remains
+  "optional" { foreach ($c in "crop-dqs-nogate", "crop-wbf", "inplace-wbf") { T "--condition", $c, "--seed", "0" }
+               T "--condition", "naive", "--imgsz", "1024"
+               T "--condition", "crop-dqs", "--band", "0.10,0.50" }
+}
