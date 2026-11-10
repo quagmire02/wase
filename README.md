@@ -12,6 +12,7 @@ wase/
   prep.py       one-time data build: fixed label lookup, scene split, visibility, audit.json
   labeling.py   pseudo-label generation for every condition (shared by train + diagnose)
   train.py      any condition, any seed, 3-generation self-training or supervised
+  adabn.py      label-free baseline: BatchNorm statistics adapted to fog, nothing else
   diagnose.py   no-training mechanism studies (scale, selection, calibration, agreement)
   metrics.py    COCO-faithful AP engine + image bootstrap + equivalence tests
   evaluate.py   pycocotools evaluation -> JSON; --report builds tables
@@ -60,11 +61,28 @@ python -m wase.evaluate --report                     # results/tables.md and tab
 
 Run `scripts\smoke.ps1` once on any new machine before starting real runs.
 
+## Conditions
+
+| Family | `--condition` | What it does |
+|---|---|---|
+| Baselines | `naive`, `supervised`, `global-dcp` | teacher labels / human labels / teacher on a de-fogged frame |
+| Refinement (previous round) | `crop-dqs-nogate`, `crop-dqs`, `crop-wbf`, `inplace-dqs`, `inplace-wbf`, `rawflip-wbf` | re-detect uncertain boxes in a second view and **move** them |
+| Verification (v2) | `verify-flip`, `verify-dcp`, `verify-scale` | use the second view to **keep or drop** uncertain boxes; geometry untouched. `--verify-mode admit\|reject` for the ablation |
+| Oracles (v2) | `oracle-nofp`, `oracle-addfn`, `oracle-geom` | naive labels with one error type repaired from human labels. Upper bounds, not methods |
+
+Useful options: `--teacher yolov8m.pt --label-imgsz 1280 --student yolov8n.pt` (strong teacher at
+label time, small deployed model), `--label-filter`, `--source`, `--fraction`, `--lr-scale`, `--imgsz`.
+`python -m wase.adabn` writes `runs/adabn/seed0/weights/final.pt`, which `evaluate` picks up like any run.
+
+Why the v2 families exist, and what each outcome would mean, is in [PLAN.md](PLAN.md) section 10.
+
 ## Guarantees the code enforces
 
 - **Same images, same schedule, same checkpoint rule for every condition.** `last.pt` is always used, and there is no early stopping.
 - **No cross-generation weight averaging.** The class map comes from the running model's class count.
 - **Each run owns its label folder**, and caches are wiped every generation.
 - **Training aborts** if a generation has zero boxes or more than 90% empty labels.
-- **Headline numbers are pycocotools.** The bootstrap engine is checked against pycocotools on every evaluation.
+- **Headline numbers are pycocotools.** The bootstrap engine is compared with pycocotools on every evaluation; the largest difference is stored in `metrics.json` and a warning is logged if it exceeds 1e-6.
+- **Intervals include training-seed variation.** The bootstrap resamples seeds as well as test images.
+- **Every model is scored in the same class space.** 80-class models get a second NMS after truck→car and train→bus are merged, so they are not charged for duplicate boxes that 5-class students cannot produce.
 - **Every run writes `config.json`** with its arguments, package versions and git commit.

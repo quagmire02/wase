@@ -175,3 +175,132 @@ The code has self-tests, but a person must check that it does what we think on t
 - Commit after every completed run. `runs/**/config.json`, `gen*_labels.json` and `results/**/metrics.json` are tracked by git; weights are not, so back them up off the machine.
 - If a result contradicts the story, report it plainly. Don't tune toward a preferred outcome.
 - Don't touch the held-out sets until `ANALYSIS_PLAN.md` is committed.
+
+---
+
+## 10. Version 2 additions (branch `wasev2`, 10 Nov 2026)
+
+Added after reading the reviews of the previous submission. Sections 1-9 are unchanged; where
+this section disagrees with them, this section wins.
+
+### 10.1 What the reviewers objected to, and what answers it
+
+| Reviewer point | Answer in this branch |
+|---|---|
+| Ablations changed two things at once (gate + placement; fusion + oversampling) | `crop-dqs-nogate`, `crop-wbf` and `inplace-wbf` move from "if time remains" into block Q2, so every step changes one factor. Oversampling stays off |
+| Padding changes context and scale together | `diagnose scale` at s=1 removes context at constant scale. `selftest` now shows a zero-padding crop can only return a box inside the raw box, so shrinkage is partly geometric, not only a detector failure. Say so in the paper |
+| Confidence gain was conditional on acceptance | Unconditional change is recorded (`mean_dconf_unconditional`, study A3) |
+| DQS judged on total counts, not per image | Study A4 scores each chosen layout against ground truth |
+| Supervised comparison not matched; resolution cause untested | One image list and schedule for all; `--imgsz 1024`, size and teacher filters (block Q1) |
+| Causal explanation asserted, not tested | **Oracle decomposition** (10.2) replaces explanation by measurement |
+| Single seed; image bootstrap ignores training variability | 3 seeds for primary pairs, and the bootstrap now **resamples training seeds as well as images** (`evaluate`, default) |
+| Result tuned and tested on the same 100 images | Held-out sets (block C), touched once |
+| "Better calibration" claimed from thresholds | ECE is measured (study A5) |
+| Diagnosis only, no method; refinement still loses to naive | **Verification conditions** (10.3) and a **label-time teacher** (10.4): two ways to change which objects are labelled |
+| One detector, one enhancement, one weather | See 10.6. Not solved by code alone |
+| Related work ends in 2023 | See 10.7 |
+
+### 10.2 Oracle decomposition: which label error actually costs accuracy?
+
+Refinement only ever moved boxes. Before building anything else, measure which kind of pseudo-label
+error is worth fixing. Each run is naive self-training with **one** error type repaired from the
+human labels (matching: same class, IoU >= 0.5, one-to-one):
+
+| Run | Repair | If it closes the gap to the best condition |
+|---|---|---|
+| `oracle-nofp` | false boxes removed | precision is the bottleneck -> rejection (verify, higher thresholds) can pay |
+| `oracle-addfn` | missed objects added | recall is the bottleneck -> admission (verify, stronger teacher) can pay |
+| `oracle-geom` | matched boxes get human geometry | localisation is the bottleneck -> only then is box refinement worth another look |
+
+These are upper bounds, not methods, and are labelled so in every table. Caveats to state: the human
+labels are themselves imperfect (the Cityscapes label files have no `train` class, so a correctly
+detected tram counts as "false"; tiny and fog-hidden human boxes count as "missed"). Read
+`gen0_labels.json` (`oracle_matched / oracle_false / oracle_missed`) before training to see how
+large each error pool is.
+
+### 10.3 Verification: agreement between views, not confidence
+
+The original uncertain band never rejected anything: a box that failed re-detection was kept. The
+`verify-*` conditions use the second view to decide and never touch geometry:
+
+- candidates are taken down to the lower band edge (0.10, below the teacher threshold);
+- above the upper edge (0.65): kept;
+- inside the band: kept only if the second view has a same-class box with IoU >= 0.5.
+
+Second views: `verify-flip` (mirror), `verify-dcp` (full-frame DCP), `verify-scale` (1.5x inference
+size). `--verify-mode admit|reject` switches off one half to show which half matters. The control
+for "it is only the lower threshold" is `naive --teacher-conf 0.10`.
+
+`verify-dcp` is the honest descendant of WASE: de-fogging used as a second opinion rather than as a
+box editor. If `verify-flip` does as well, the paper says de-fogging is not what helps, and that is
+still a result.
+
+### 10.4 Label-time teacher
+
+`--teacher yolov8m.pt --label-imgsz 1280 --student yolov8n.pt --generations 1 --epochs 120`: a larger
+model at higher resolution writes the labels once; the deployed model is the same YOLOv8n at 640.
+This is the most likely way to raise the absolute numbers and the least novel, so it is reported as
+a strong baseline that any proposed method must be compared with, not as the contribution.
+(`--label-imgsz` alone, with the default teacher, separates the effect of resolution from model size.)
+
+### 10.5 BatchNorm-only baseline
+
+Section 2 credits part of naive's gain to normalisation layers adapting to fog. `python -m wase.adabn`
+replaces the COCO model's BatchNorm statistics with those of the foggy training images and changes
+nothing else. It costs minutes and turns that sentence into a number.
+
+### 10.6 Scope (not solved by this branch)
+
+The strongest reviewer said: one detector, one enhancement, one weather, 100 images. In order of
+value per GPU-hour:
+
+1. **More evaluation images at no training cost:** ACDC rain, snow and night use the same label
+   format; `evaluate` runs on them unchanged. Report them as "does the fog-trained model transfer",
+   not as a claim about those conditions.
+2. **A second detector size** (`--teacher yolov8s.pt --student yolov8s.pt`) for the two primary pairs.
+3. **A standard benchmark:** Cityscapes -> Foggy Cityscapes with the usual 8 classes, so numbers sit
+   beside published ones. Needs a second class table in `common.py` (not written yet).
+4. **A learned de-hazer** next to DCP for `global-dcp` and `verify-dcp` (not written yet).
+
+### 10.7 Reading to do before any novelty claim
+
+- ADT (Wang et al., 2024, arXiv:2403.15786): scale changes during pseudo-labelling in poor visibility.
+- Foggy-Aware Teacher (Qin et al., RA-L 2025): de-hazing before the teacher. Same target venue.
+- Soft Teacher (box jitter to select regression targets) and Probabilistic Teacher (explicit
+  localisation uncertainty): both are quality signals other than classification confidence, so the
+  sentence "the quality signal is still confidence" must go.
+- Consistency / agreement-based pseudo-label selection in semi-supervised detection: `verify-*` is
+  close to this family. **Check how close before calling it new.** The defensible claim may be the
+  measurement (which error matters under fog, 10.2) with verification as its consequence.
+
+### 10.8 Corrections to sections 2 and 4
+
+- **Flaw 3** ("crop + zoom breaks the detector"): with zero padding the re-detected box must lie
+  inside the raw box, so an area ratio below 1 is guaranteed. The detector failure is real only to
+  the extent that shrinkage exceeds what s=1 (no zoom) already shows.
+- **Flaw 4** (data-processing inequality): drop this argument. Pre-processing cannot add information,
+  but it can help a fixed, mismatched detector; whether it does is empirical.
+- **Core claim** (section 4): `data/audit.json` shows boxes with transmittance below 0.1 are 0%,
+  0.38% and 7.93% of Foggy Cityscapes boxes at the three fog levels, about 2% of all human boxes;
+  RTTS has no transmittance. A 2% label change is unlikely to carry the gap alone. Keep visibility as
+  one hypothesis beside size (30.6% of boxes are under 12 px at 640) and the missing `train` class,
+  and let 10.2 say which pool of errors matters.
+- **Checkpoints 2 and 3** ("near the old 0.618 / 0.716"): the old scorer pooled classes; the headline
+  is now the class mean. Compare the old numbers with `instance_weighted_AP50`, not `mAP50`.
+- **Equivalence margin** (+-0.01 AP): check the width of the bootstrap interval after the first two
+  runs. If it is wider than the margin on the held-out sets, widen the margin in `ANALYSIS_PLAN.md`
+  *before* committing it, or the test can only ever say "inconclusive".
+- **`--lr-scale 0.1`** is run for `supervised` and for `naive`, otherwise "forgetting" cannot be
+  told apart from "a lower learning rate helps everything".
+
+### 10.9 Revised order
+
+| Step | Work | Decision |
+|---|---|---|
+| 1 | `selftest`, `prep`, `naive` + `supervised` seed 0, `adabn` (block `week2`) | Gate 1 as before |
+| 2 | Block A diagnostics | Gate A as before |
+| 3 | Block `oracle` (3 runs) | Which of precision / recall / localisation has headroom |
+| 4 | Block `verify` and block `teacher`, seed 0 | Does anything beat naive on development data? |
+| 5 | Q1 mechanism runs, full Q2 ablation, seeds 1-2 for every primary pair | |
+| 6 | Fill and commit `ANALYSIS_PLAN.md`; held-out once | |
+

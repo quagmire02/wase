@@ -9,6 +9,10 @@ Train any condition, any seed.
   python -m wase.train --condition supervised --fraction 0.25
   python -m wase.train --condition supervised --imgsz 1024
   python -m wase.train --condition naive --generations 1 --epochs 120
+  python -m wase.train --condition verify-flip                  # agreement instead of confidence
+  python -m wase.train --condition oracle-addfn                 # naive labels + the objects it missed
+  python -m wase.train --condition naive --teacher yolov8m.pt --label-imgsz 1280 \
+      --student yolov8n.pt --generations 1 --epochs 120         # strong teacher at label time only
 
 Output: runs/<run-name>/seed<k>/
   config.json            every argument + software versions + git commit
@@ -42,7 +46,7 @@ from tqdm import tqdm
 from .common import (CLASSES, NAMES, NC, class_map_for, default_data_dir, default_runs_dir,
                      env_info, find_base_teacher, get_device, imread, link_or_copy, load_json,
                      log, read_labels, save_json, seed_everything, stable_unit, write_labels)
-from .labeling import PSEUDO_CONDITIONS, label_image
+from .labeling import ORACLE_KINDS, PSEUDO_CONDITIONS, VERIFY_MODES, apply_oracle, label_image
 from .metrics import greedy_match
 
 # Needed for deterministic cuBLAS kernels; must be set before CUDA initialises.
@@ -53,7 +57,9 @@ SCHEDULE = [  # teacher confidence, lr0, epochs
     (0.20, 5e-4, 40),
     (0.25, 1e-4, 30),
 ]
-CONDITIONS = sorted(PSEUDO_CONDITIONS) + ["supervised"]
+# oracle-<kind>: naive pseudo-labels with one error type repaired from the human labels
+ORACLE_CONDITIONS = {f"oracle-{k}": k for k in ORACLE_KINDS}
+CONDITIONS = sorted(PSEUDO_CONDITIONS) + sorted(ORACLE_CONDITIONS) + ["supervised"]
 MAX_EMPTY_FRACTION = 0.90
 VIS_BINS = [(0.0, 0.1), (0.1, 0.2), (0.2, 0.5), (0.5, 1.01)]
 WIDTH_BINS = [(0, 12), (12, 32), (32, 1e9)]   # box width in px at 640 training scale
@@ -68,6 +74,16 @@ def parse_args(argv=None):
     ap.add_argument("--runs", type=Path, default=default_runs_dir())
     ap.add_argument("--name", default=None, help="run name (default: derived from options)")
     ap.add_argument("--teacher", default=None, help="Gen-0 teacher (default: COCO yolov8n.pt)")
+    ap.add_argument("--student", default=None,
+                    help="Gen-0 student initialisation (default: the Gen-0 teacher). Set it to "
+                         "yolov8n.pt when --teacher is a larger model, so the deployed model stays small")
+    ap.add_argument("--label-imgsz", type=int, default=None,
+                    help="inference size for pseudo-labelling (default: --imgsz). Later generations "
+                         "label with the student at this size too")
+    ap.add_argument("--verify-mode", default="both", choices=VERIFY_MODES,
+                    help="verify-* conditions: admit and reject (both), or only one half")
+    ap.add_argument("--oracle-iou", type=float, default=0.5,
+                    help="oracle-* conditions: IoU at which a pseudo box matches a human box")
     ap.add_argument("--generations", type=int, default=3)
     ap.add_argument("--epochs", default=None,
                     help="comma list per generation (e.g. 50,40,30) or one value for all")
@@ -111,11 +127,21 @@ def run_name(a):
         parts.append(f"lr{a.lr_scale:g}")
     if a.freeze:
         parts.append(f"freeze{a.freeze}")
+    if a.teacher:
+        parts.append("T" + Path(a.teacher).stem)
+    if a.student:
+        parts.append("S" + Path(a.student).stem)
+    if a.label_imgsz and a.label_imgsz != a.imgsz:
+        parts.append(f"label{a.label_imgsz}")
+    if a.verify_mode != "both" and a.condition.startswith("verify-"):
+        parts.append(a.verify_mode)
+    if a.oracle_iou != 0.5 and a.condition in ORACLE_CONDITIONS:
+        parts.append(f"oiou{a.oracle_iou:g}")
     if a.generations != 3:
         parts.append(f"{a.generations}gen")
     if a.epochs:
         parts.append(f"ep{a.epochs.replace(',', '-')}")
-    if a.teacher_conf and a.condition in PSEUDO_CONDITIONS:
+    if a.teacher_conf and a.condition != "supervised":
         parts.append("conf" + a.teacher_conf.replace(",", "-"))
     if a.oversample:
         parts.append("oversample")
@@ -286,7 +312,7 @@ def agreement(labels, human, manifest, stems):
 
 
 # ---------------------------------------------------------------------------
-def generate_pseudo(a, teacher_path, conf, stems, manifest, spec, band):
+def generate_pseudo(a, teacher_path, conf, stems, manifest, spec, band, human=None, oracle=None):
     from ultralytics import YOLO
     model = YOLO(teacher_path)
     cmap = class_map_for(model)
@@ -299,7 +325,14 @@ def generate_pseudo(a, teacher_path, conf, stems, manifest, spec, band):
             if img is None:
                 st["unreadable"] += 1
                 continue
-            boxes, info = label_image(model, img, cmap, spec, conf, band, a.imgsz)
+            boxes, info = label_image(model, img, cmap, spec, conf, band,
+                                      a.label_imgsz or a.imgsz, a.verify_mode)
+            if oracle:
+                boxes, oc = apply_oracle(oracle, boxes, human[s], a.oracle_iou)
+                st.update(oc)
+            for k in ("n_candidates", "n_admitted", "n_rejected"):
+                if k in info:
+                    st[k] += info[k]
             labels[s] = boxes
             st["boxes"] += len(boxes)
             st["boxes_raw_view"] += info.get("n_raw", 0)
@@ -359,6 +392,9 @@ def main(argv=None):
     band = tuple(float(x) for x in a.band.split(","))
     sched = schedule(a)
     teacher0 = a.teacher or find_base_teacher()
+    student0 = a.student or teacher0
+    if band[0] >= band[1]:
+        raise SystemExit("--band needs lower < upper")
 
     manifest = load_json(a.data / "manifest.json")
     human = load_json(a.data / "human_boxes.json")
@@ -370,7 +406,7 @@ def main(argv=None):
     cfg = {"run": name, "args": {k: str(v) if isinstance(v, Path) else v for k, v in vars(a).items()},
            "schedule": [{"teacher_conf": c, "lr0": lr, "epochs": e} for c, lr, e in sched],
            "n_train_images": len(stems), "n_val_monitor_images": n_val,
-           "gen0_teacher": teacher0, "env": env_info()}
+           "gen0_teacher": teacher0, "gen0_student_init": student0, "env": env_info()}
     save_json(cfg, run / "config.json")
     log(f"run {name} seed {a.seed}: {len(stems)} train images, {n_val} monitor images", logf)
 
@@ -389,9 +425,11 @@ def main(argv=None):
                   "empty": sum(not v for v in labels.values()), "dropped_by_filter": dropped}
             refine, picks = None, []
         else:
-            spec = PSEUDO_CONDITIONS[a.condition]
+            oracle = ORACLE_CONDITIONS.get(a.condition)
+            spec = PSEUDO_CONDITIONS["naive" if oracle else a.condition]
             log(f"gen {g}: labelling {len(stems)} images with {Path(str(teacher)).name} at conf {conf}", logf)
-            labels, st, refine, picks = generate_pseudo(a, teacher, conf, stems, manifest, spec, band)
+            labels, st, refine, picks = generate_pseudo(a, teacher, conf, stems, manifest, spec, band,
+                                                        human, oracle)
         n = len(stems)
         if st["boxes"] == 0:
             raise RuntimeError(f"gen {g}: zero boxes -- the teacher is dead; refusing to train")
@@ -420,7 +458,7 @@ def main(argv=None):
         log(f"gen {g}: {st['boxes']} boxes, {100 * st['empty'] / n:.1f}% empty, "
             f"vs human P={ag['precision']} R={ag['recall']}", logf)
 
-        init = teacher0 if g == 0 else teacher
+        init = student0 if g == 0 else teacher
         teacher = train_generation(a, run, g, init, yml, lr0, epochs)
         log(f"gen {g} trained: lr0 {lr0}, {epochs} epochs -> {teacher}", logf)
 

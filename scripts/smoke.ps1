@@ -7,12 +7,14 @@ $D = "smoke\data"; $R = "smoke\runs"; $O = "smoke\results"
 
 & $py -m wase.selftest;                                                        if ($LASTEXITCODE) { exit 1 }
 & $py -m wase.prep --data $D --limit-scenes 15;                                if ($LASTEXITCODE) { exit 1 }
-foreach ($c in "naive", "crop-dqs", "inplace-wbf") {
+foreach ($c in "naive", "crop-dqs", "inplace-wbf", "verify-flip", "oracle-addfn") {
     & $py -m wase.train --condition $c --data $D --runs $R --generations 2 --epochs 2 `
         --teacher-conf 0.15,0.005 --batch 8 --workers 0;                       if ($LASTEXITCODE) { exit 1 }
 }
 & $py -m wase.train --condition supervised --label-filter visibility --tau 0.2 `
     --data $D --runs $R --generations 1 --epochs 1 --batch 8 --workers 0;      if ($LASTEXITCODE) { exit 1 }
+
+& $py -m wase.adabn --data $D --runs $R --max-images 32;                        if ($LASTEXITCODE) { exit 1 }
 
 $G = @("--gt", "$D\dev_gt.json", "--img-root", "$D\store\images")
 & $py -m wase.evaluate --set smoke_dev --results $O @G `

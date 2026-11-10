@@ -203,18 +203,27 @@ def draw_weights(n_img, n_boot, seed=0):
         yield np.bincount(rng.integers(0, n_img, n_img), minlength=n_img)
 
 
-def bootstrap(groups, n_boot=2000, seed=0, area="all"):
+def bootstrap(groups, n_boot=2000, seed=0, area="all", resample_seeds=True):
     """
     groups: {label: [Scorer per seed]} all built on the same GT.
     Each resample draws images once; every seed of every label is re-scored on
-    the same draw and seeds are averaged inside the draw.
+    the same image draw. With resample_seeds (default) the training seeds of
+    each label are ALSO drawn with replacement, independently per label, so the
+    interval reflects seed-to-seed variation as well as the choice of test
+    images (a two-level bootstrap). With one seed this changes nothing; with
+    three it is a coarse but honest estimate. resample_seeds=False reproduces
+    the previous round: seeds treated as fixed and simply averaged.
     Returns {label: np.array(n_boot)} of seed-averaged mAP50.
     """
     n_img = next(iter(groups.values()))[0].n_img
     out = {k: np.empty(n_boot) for k in groups}
+    seed_rng = np.random.default_rng([seed, 1])
     for b, w in enumerate(draw_weights(n_img, n_boot, seed)):
         for k, scorers in groups.items():
-            out[k][b] = np.nanmean([s.map50_resampled(w, area) for s in scorers])
+            vals = np.array([s.map50_resampled(w, area) for s in scorers])
+            if resample_seeds and len(vals) > 1:
+                vals = vals[seed_rng.integers(0, len(vals), len(vals))]
+            out[k][b] = np.nanmean(vals)
     return out
 
 
@@ -236,25 +245,37 @@ def delta_stats(a, b, margin=None, alpha=0.05):
 # ---------------------------------------------------------------------------
 # Label agreement (pseudo-labels vs human labels), greedy one-to-one at IoU>=thr
 # ---------------------------------------------------------------------------
-def greedy_match(gt, pred, thr=0.5):
+def match_pairs(gt, pred, thr=0.5):
     """
+    Greedy one-to-one, class-aware matching in descending prediction score.
     gt: list of (cls, x1, y1, x2, y2); pred: list of (cls, x1, y1, x2, y2, score).
-    Returns (gt_matched[bool], pred_matched[bool]).
+    Returns pred_to_gt: for every prediction the index of its GT box, or -1.
     """
     from .common import iou_xyxy
-    gm = [False] * len(gt)
-    pm = [False] * len(pred)
+    taken = [False] * len(gt)
+    pred_to_gt = [-1] * len(pred)
     for j in sorted(range(len(pred)), key=lambda k: -pred[k][5]):
         best, bi = thr, -1
         for i, g in enumerate(gt):
-            if gm[i] or g[0] != pred[j][0]:
+            if taken[i] or g[0] != pred[j][0]:
                 continue
             v = iou_xyxy(pred[j][1:5], g[1:5])
             if v >= best:
                 best, bi = v, i
         if bi >= 0:
-            gm[bi] = pm[j] = True
-    return gm, pm
+            taken[bi] = True
+            pred_to_gt[j] = bi
+    return pred_to_gt
+
+
+def greedy_match(gt, pred, thr=0.5):
+    """Returns (gt_matched[bool], pred_matched[bool]); see match_pairs."""
+    p2g = match_pairs(gt, pred, thr)
+    gm = [False] * len(gt)
+    for i in p2g:
+        if i >= 0:
+            gm[i] = True
+    return gm, [i >= 0 for i in p2g]
 
 
 def expected_calibration_error(conf, correct, n_bins=15):

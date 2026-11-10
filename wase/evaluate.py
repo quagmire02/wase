@@ -17,7 +17,9 @@ Evaluate models on a COCO-format GT and write one JSON; build tables from JSONs.
   python -m wase.evaluate --report
 
 Headline numbers come from pycocotools itself. Our engine (metrics.py) is
-checked against them on every run and then used for the bootstrap.
+checked against them on every run and then used for the bootstrap. The
+bootstrap resamples test images AND (when a condition has several seeds) its
+training seeds, so intervals include seed-to-seed variation.
 
 Model spec: `label=glob` or a bare glob. For a bare glob matching
 runs/<label>/seed<k>/weights/final.pt the label is <label>; every match of one
@@ -36,8 +38,8 @@ from pathlib import Path
 import numpy as np
 from tqdm import tqdm
 
-from .common import (ACDC_TO_OURS, CLASSES, NC, PROJECT, class_map_for, default_results_dir,
-                     get_device, load_json, log, save_json)
+from .common import (ACDC_TO_OURS, CLASSES, IDENTITY, NC, PROJECT, class_map_for,
+                     default_results_dir, get_device, load_json, log, nms_classwise, save_json)
 from .metrics import Scorer, bootstrap, delta_stats
 
 PRED_CONF, PRED_IOU, PRED_MAXDET = 0.001, 0.7, 300
@@ -105,7 +107,7 @@ def predict_all(weights, images, imgsz, cache_dir):
     from ultralytics import YOLO
     p = Path(weights)
     tag = hashlib.md5(f"{p.resolve() if p.exists() else weights}|"
-                      f"{p.stat().st_mtime if p.exists() else ''}|{imgsz}".encode()).hexdigest()[:12]
+                      f"{p.stat().st_mtime if p.exists() else ''}|{imgsz}|remap-nms".encode()).hexdigest()[:12]
     cache = cache_dir / f"{p.parent.parent.parent.name}_{p.parent.parent.name}_{p.stem}_{tag}.json" \
         if p.exists() and len(p.parts) > 3 else cache_dir / f"{p.stem}_{tag}.json"
     if cache.exists():
@@ -124,6 +126,11 @@ def predict_all(weights, images, imgsz, cache_dir):
                                                    r.boxes.conf.cpu().numpy()):
                     if c in cmap:
                         rows.append([cmap[c], float(x1), float(y1), float(x2 - x1), float(y2 - y1), float(s)])
+            if cmap is not IDENTITY:
+                # An 80-class model suppresses truck and car separately; after the
+                # remap both are 'car', so one object can carry two boxes. Students
+                # (5-class) never have this, so suppress again in our class space.
+                rows = _nms_xywh(rows, PRED_IOU)
             raw[str(iid)] = rows
         save_json(raw, cache)
     dets = {}
@@ -131,6 +138,12 @@ def predict_all(weights, images, imgsz, cache_dir):
         a = np.array(rows, float).reshape(-1, 6)
         dets[int(iid)] = {"cls": a[:, 0].astype(int), "boxes": a[:, 1:5], "score": a[:, 5]}
     return dets
+
+
+def _nms_xywh(rows, iou):
+    """Class-aware NMS for [cls, x, y, w, h, score] pixel boxes (top-left xywh)."""
+    cx = [[r[0], r[1] + r[3] / 2, r[2] + r[4] / 2, r[3], r[4], r[5]] for r in rows]
+    return [[b[0], b[1] - b[3] / 2, b[2] - b[4] / 2, b[3], b[4], b[5]] for b in nms_classwise(cx, iou)]
 
 
 def pycoco_summary(gt, dets):
@@ -198,8 +211,9 @@ def evaluate(a):
 
     boot = {}
     if a.bootstrap:
-        log(f"bootstrap: {a.bootstrap} image resamples, seeds averaged inside each resample")
-        draws = bootstrap(scorers, a.bootstrap, a.boot_seed)
+        log(f"bootstrap: {a.bootstrap} image resamples, training seeds "
+            + ("held fixed" if a.fixed_seeds else "resampled too"))
+        draws = bootstrap(scorers, a.bootstrap, a.boot_seed, resample_seeds=not a.fixed_seeds)
         boot["per_model"] = {k: {"mean": float(np.nanmean(v)),
                                  "ci95": [float(np.nanpercentile(v, 2.5)), float(np.nanpercentile(v, 97.5))]}
                              for k, v in draws.items()}
@@ -222,7 +236,8 @@ def evaluate(a):
               "engine_vs_pycocotools_max_abs_diff": worst,
               "models": per_model, "bootstrap": boot,
               "bootstrap_settings": {"n": a.bootstrap, "seed": a.boot_seed, "unit": "image",
-                                     "seeds": "averaged within each resample"}}
+                                     "seeds": ("fixed, averaged within each resample" if a.fixed_seeds else
+                                               "resampled with replacement per condition, then averaged")}}
     save_json(result, out_dir / "metrics.json")
     log(f"wrote {out_dir / 'metrics.json'}")
 
@@ -242,7 +257,8 @@ def report(results):
         md.append(f"\n## {r['set']}  ({r['n_images']} images, {r['n_objects']} objects)\n")
         md.append("Objects per class: " + ", ".join(f"{k} {v}" for k, v in r["objects_per_class"].items()) + "\n")
         md.append("Observed values are seed means of pycocotools results; "
-                  "CI = 95% paired image bootstrap of the seed-averaged mAP50.\n")
+                  "CI = 95% paired image bootstrap of the seed-averaged mAP50 "
+                  f"(training seeds: {r.get('bootstrap_settings', {}).get('seeds', 'n/a')}).\n")
         md.append("| condition | seeds | mAP50 | (bootstrap CI) | mAP75 | mAP50:95 | small | medium | large | inst.-wt AP50 |")
         md.append("|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|")
         tex.append(f"% {r['set']}\n\\begin{{tabular}}{{lcccccccc}}\\toprule\n"
@@ -286,6 +302,8 @@ def main():
     ap.add_argument("--margin", type=float, default=None, help="equivalence margin in AP (e.g. 0.01)")
     ap.add_argument("--bootstrap", type=int, default=2000)
     ap.add_argument("--boot-seed", type=int, default=0)
+    ap.add_argument("--fixed-seeds", action="store_true",
+                    help="do not resample training seeds in the bootstrap (previous round's behaviour)")
     ap.add_argument("--results", type=Path, default=default_results_dir())
     ap.add_argument("--report", action="store_true")
     a = ap.parse_args()
