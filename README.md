@@ -17,6 +17,7 @@ wase/
   metrics.py    COCO-faithful AP engine + image bootstrap + equivalence tests
   evaluate.py   pycocotools evaluation -> JSON; --report builds tables
   selftest.py   checks that need no data (run first)
+  summarize.py  one page of every run and score (results/summary.md), built from tracked JSON
   inspect_labels.py  draws labels on random images for a by-eye check (results/inspect/)
 scripts/
   smoke.ps1             10-minute end-to-end test on a tiny subset
@@ -60,6 +61,20 @@ python -m wase.evaluate --report                     # results/tables.md and tab
 ```
 
 Run `scripts\smoke.ps1` once on any new machine before starting real runs.
+
+### Test sets
+
+| Set | GT file | Role |
+|---|---|---|
+| ACDC fog val (100 images) | ACDC `instancesonly_fog_val_gt_detection.json` | development |
+| ACDC fog train (~400) | ACDC json | held-out |
+| Foggy Driving | its own json | held-out |
+| Foggy Cityscapes val cities (~500 scenes × 3 fog levels) | `data/fcval_gt.json`, `data/fcval_beta0.02_gt.json` | held-out; built by `prep`, never trained on |
+| ACDC rain / snow / night val | ACDC json for that condition | transfer check, no training; same `evaluate` command |
+
+After each block: `python -m wase.summarize`, then commit `runs/**/config.json`, `runs/**/gen*_labels.json`
+and `results/`. `scripts\run_experiments.ps1 -Block <name> -Pilot` runs a block at about a third of the cost
+(one generation, 40 epochs) to rank conditions on development data; pilot runs are never reported.
 
 ## Conditions
 

@@ -7,6 +7,7 @@
 ## Data
 - **Development:** ACDC fog val (100 images). Used freely during development.
 - **Held-out 1:** ACDC fog train (~400 images; confirm the count: ____). Never evaluated before this commit.
+- **Held-out 3:** Foggy Cityscapes validation cities (Frankfurt, Lindau, Münster), all three fog levels (____ images), built by `prep` and excluded from training. P1–P3 are tested on held-out 1 and 2; held-out 3 is reported alongside (its labels include fog-hidden objects, so it is not a pure test of real-fog transfer).
 - **Held-out 2:** Foggy Driving (____ images, five classes confirmed: yes/no).
 - **Class mapping:** person (+rider), bicycle, car (+truck), motorcycle, bus (+train).
 

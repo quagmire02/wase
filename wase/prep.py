@@ -11,8 +11,10 @@ RTTS VOC XML, and writes everything into <data>/:
   human_labels/<stem>.txt    human labels, our 5 classes, YOLO format
   human_boxes.json           {stem: [[cls, cx, cy, w, h, transmittance|None], ...]}
   manifest.json              one record per image (source, scene, beta, split, size)
-  lists/train.txt, dev.txt   image file names per split
+  lists/train.txt, dev.txt, test.txt   image file names per split
   dev_gt.json                COCO-format GT of the dev split (for evaluate/diagnose)
+  fcval_gt.json              COCO GT of the held-out Foggy Cityscapes validation cities
+  fcval_beta0.02_gt.json     the same, densest fog only (the setting the literature reports)
   audit.json                 every count the paper cites
 
 Fixes relative to the previous round
@@ -46,6 +48,11 @@ from .common import (CITYSCAPES_TXT_TO_OURS, CLASSES, IMG_EXTS, NC, RTTS_NAME_TO
                      log, save_json, stable_unit, write_labels)
 
 DEV_FRACTION = 0.10
+# The official Cityscapes validation cities. Every image of these cities is kept
+# out of training and monitoring (split 'test'), giving a third, larger held-out
+# set with clean labels (~500 scenes x 3 fog levels) from data already on disk.
+# Held-out rules of ANALYSIS_PLAN.md apply to it.
+TEST_CITIES = ("frankfurt", "lindau", "munster")
 MIN_BOX_PX = 4
 BETAS = (0.005, 0.01, 0.02)
 CITY_MARK = "_leftImg8bit"
@@ -285,7 +292,10 @@ def build(data, limit_scenes=None, visibility=True, max_fit_residual=0.05):
         boxes = dedupe(boxes, stats)
 
         src.copy_to(rec["key"], store / rec["name"])
-        split = "dev" if stable_unit("scene:" + scene) < DEV_FRACTION else "train"
+        if is_city and stem.split("_")[0].lower() in TEST_CITIES:
+            split = "test"
+        else:
+            split = "dev" if stable_unit("scene:" + scene) < DEV_FRACTION else "train"
         manifest[stem] = {"name": rec["name"], "source": "city" if is_city else "rtts",
                           "scene": scene, "beta": beta_of(stem) if is_city else None,
                           "split": split, "orig_folder": rec["orig_folder"],
@@ -325,7 +335,7 @@ def build(data, limit_scenes=None, visibility=True, max_fit_residual=0.05):
                     "max_fit_residual_accepted": max_fit_residual}
 
     # --- outputs ------------------------------------------------------------
-    lists = {"train": [], "dev": []}
+    lists = {"train": [], "dev": [], "test": []}
     for stem, m in sorted(manifest.items()):
         lists[m["split"]].append(m["name"])
     for k, v in lists.items():
@@ -334,19 +344,22 @@ def build(data, limit_scenes=None, visibility=True, max_fit_residual=0.05):
         p.write_text("\n".join(v) + "\n", encoding="utf-8")
     save_json(manifest, data / "manifest.json")
     save_json(human, data / "human_boxes.json")
-    save_json(dev_coco_gt(manifest, human), data / "dev_gt.json")
+    save_json(coco_gt(manifest, human, "dev"), data / "dev_gt.json")
+    save_json(coco_gt(manifest, human, "test"), data / "fcval_gt.json")
+    save_json(coco_gt(manifest, human, "test", beta=BETAS[-1]), data / f"fcval_beta{BETAS[-1]:g}_gt.json")
     audit = make_audit(manifest, human, stats, orig_folders_by_scene, vis_info, src_path, rtts_xml)
     save_json(audit, data / "audit.json")
-    log(f"train images {len(lists['train'])}, dev images {len(lists['dev'])}")
+    log(f"train images {len(lists['train'])}, dev images {len(lists['dev'])}, "
+        f"held-out Foggy Cityscapes val images {len(lists['test'])}")
     log(f"wrote {data / 'audit.json'}")
     return audit
 
 
-def dev_coco_gt(manifest, human):
-    """COCO GT for the dev split in our class space (category_id = class + 1)."""
+def coco_gt(manifest, human, split, beta=None):
+    """COCO GT for one split in our class space (category_id = class + 1)."""
     imgs, anns, aid = [], [], 1
     for i, (stem, m) in enumerate(sorted((s, m) for s, m in manifest.items()
-                                         if m["split"] == "dev")):
+                                         if m["split"] == split and (beta is None or m["beta"] == beta))):
         W, H = m["width"], m["height"]
         imgs.append({"id": i + 1, "file_name": m["name"], "width": W, "height": H})
         for c, cx, cy, w, h, t in human[stem]:
@@ -361,7 +374,7 @@ def dev_coco_gt(manifest, human):
 
 def make_audit(manifest, human, stats, folders_by_scene, vis_info, src_path, rtts_xml):
     by = Counter()
-    cls = {"train": Counter(), "dev": Counter()}
+    cls = {"train": Counter(), "dev": Counter(), "test": Counter()}
     widths, vis = [], defaultdict(list)
     for stem, m in manifest.items():
         by[(m["source"], m["split"])] += 1
@@ -392,7 +405,8 @@ def make_audit(manifest, human, stats, folders_by_scene, vis_info, src_path, rtt
         "scenes_in_both_original_folders": sum(1 for v in folders_by_scene.values() if len(v) > 1),
         "visibility": {**vis_info, "by_beta": vis_summary},
         "counters": dict(sorted(stats.items())),
-        "split_rule": f"scene-level, dev if md5('scene:'+scene) fraction < {DEV_FRACTION}",
+        "split_rule": (f"test = Foggy Cityscapes images of {', '.join(TEST_CITIES)}; otherwise scene-level, "
+                       f"dev if md5('scene:'+scene) fraction < {DEV_FRACTION}"),
     }
 
 

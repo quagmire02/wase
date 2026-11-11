@@ -5,10 +5,14 @@
 #   powershell -ExecutionPolicy Bypass -File scripts\run_experiments.ps1 -Block week2
 param([Parameter(Mandatory = $true)]
       [ValidateSet("prep", "week2", "blockA", "oracle", "verify", "teacher", "q1", "seeds", "q2", "optional")] [string]$Block,
-      [string]$AcdcGt = $env:ACDC_FOG_VAL_GT, [string]$AcdcImg = $env:ACDC_FOG_VAL_IMG)
+      [string]$AcdcGt = $env:ACDC_FOG_VAL_GT, [string]$AcdcImg = $env:ACDC_FOG_VAL_IMG,
+      # -Pilot: one generation of 40 epochs, to RANK conditions on development data at about a third
+      # of the cost. Pilot runs get their own names (..._1gen_ep40) and are never reported as results.
+      [switch]$Pilot)
 $ErrorActionPreference = "Stop"
 $py = if ($env:WASE_PYTHON) { $env:WASE_PYTHON } else { "python" }
-function T([string[]]$a) { & $py -m wase.train @a; if ($LASTEXITCODE) { throw "train failed: $a" } }
+function T([string[]]$a) { if ($Pilot) { $a += @("--generations", "1", "--epochs", "40") }
+                           & $py -m wase.train @a; if ($LASTEXITCODE) { throw "train failed: $a" } }
 
 switch ($Block) {
   "prep"   { & $py -m wase.selftest; & $py -m wase.prep }
@@ -26,7 +30,9 @@ switch ($Block) {
                & $py -m wase.diagnose selection @G --weights $t[1] --tag $t[0] }
              & $py -m wase.diagnose calibration @G --tag acdc --models coco=..\yolov8n.pt `
                  naive=runs\naive\seed0\weights\final.pt supervised=runs\supervised\seed0\weights\final.pt
-             & $py -m wase.diagnose agreement --split train --tag coco_gen0 }
+             & $py -m wase.diagnose agreement --split train --tag coco_gen0
+             & $py -m wase.diagnose errors @G --tag acdc --models coco=..\yolov8n.pt `
+                 naive=runs\naive\seed0\weights\final.pt supervised=runs\supervised\seed0\weights\final.pt }
 
   # PLAN 10.2: which pseudo-label error costs accuracy? (upper bounds, 1 seed each)
   "oracle" { foreach ($c in "oracle-nofp", "oracle-addfn", "oracle-geom") { T "--condition", $c, "--seed", "0" } }

@@ -15,6 +15,10 @@ under results/diagnose/.
   # A6: teacher pseudo-labels vs human labels on the corpus, by size/visibility/source
   python -m wase.diagnose agreement --weights yolov8n.pt --split train --conf 0.15
 
+  # what kind of mistakes does each model make? (by object size and fog transmittance)
+  python -m wase.diagnose errors --models coco=yolov8n.pt naive=runs/naive/seed0/weights/final.pt \
+      --gt <gt.json> --img-root <dir> --conf 0.25
+
 Run scale/selection with two teachers (COCO and the naive seed-0 final model),
 as the plan asks, by calling them twice with different --weights and --tag.
 """
@@ -280,11 +284,108 @@ def study_agreement(a):
     log(f"wrote {a.out / f'agreement_{a.tag}.json'}")
 
 
+# ---------------------------------------------------------------------------
+ERR_SIZE = [("small", 0, 32 ** 2), ("medium", 32 ** 2, 96 ** 2), ("large", 96 ** 2, 1e18)]
+ERR_VIS = [("t<0.1", 0, 0.1), ("t0.1-0.2", 0.1, 0.2), ("t0.2-0.5", 0.2, 0.5), ("t>=0.5", 0.5, 1.01)]
+
+
+def classify_errors(gts, dets, thr=0.5, loose=0.1):
+    """
+    One image. gts: [(cls, x1, y1, x2, y2)], dets: [(cls, x1, y1, x2, y2, score)].
+    Every detection gets exactly one label; every GT is found or missed.
+      correct     same class, IoU >= thr, GT not yet taken
+      duplicate   same class, IoU >= thr, but the GT is already taken
+      wrong_class IoU >= thr with a GT of another class
+      mislocated  same class, loose <= IoU < thr
+      background  none of the above
+    Returns (label per detection, found[bool] per GT, missed_reason per GT or None),
+    where a missed GT is 'mislocated' / 'wrong_class' if such a detection touched it,
+    else 'unseen'.
+    """
+    taken = [False] * len(gts)
+    touched = [None] * len(gts)
+    labels = [None] * len(dets)
+    for j in sorted(range(len(dets)), key=lambda k: -dets[k][5]):
+        d = dets[j]
+        ious = [iou_xyxy(d[1:5], g[1:5]) for g in gts]
+        same = [(v, i) for i, (v, g) in enumerate(zip(ious, gts)) if g[0] == d[0]]
+        free = [(v, i) for v, i in same if v >= thr and not taken[i]]
+        if free:
+            taken[max(free)[1]] = True
+            labels[j] = "correct"
+        elif any(v >= thr for v, _ in same):
+            labels[j] = "duplicate"
+        elif any(v >= thr and g[0] != d[0] for v, g in zip(ious, gts)):
+            labels[j] = "wrong_class"
+            i = max((v, i) for i, (v, g) in enumerate(zip(ious, gts)) if g[0] != d[0])[1]
+            touched[i] = touched[i] or "wrong_class"
+        elif any(v >= loose for v, _ in same):
+            labels[j] = "mislocated"
+            touched[max(same)[1]] = "mislocated"
+        else:
+            labels[j] = "background"
+    return labels, taken, [None if f else (t or "unseen") for f, t in zip(taken, touched)]
+
+
+def study_errors(a):
+    from ultralytics import YOLO
+    gt, files, _ = load_gt(a.gt)
+    imgs = resolve_images(files, a.img_root)
+    out = {"gt": str(a.gt), "conf": a.conf, "iou": 0.5, "models": {},
+           "note": ("Detections above --conf, each given one label. recall_* tables count GT boxes. "
+                    "Sizes are COCO areas in the image's own pixels; transmittance bins exist only "
+                    "when the GT carries it (our Foggy Cityscapes sets).")}
+    for spec in a.models:
+        label, w = spec.split("=", 1)
+        model = YOLO(w)
+        cmap = class_map_for(model)
+        det_n, miss_n = defaultdict(int), defaultdict(int)
+        by_size = {k: [0, 0] for k, _, _ in ERR_SIZE}
+        by_vis = {k: [0, 0] for k, _, _ in ERR_VIS}
+        for iid, path in tqdm(imgs.items(), desc=f"errors {label}"):
+            img = imread(path)
+            if img is None:
+                continue
+            H, W = img.shape[:2]
+            g = gt[iid]
+            keep = ~g["crowd"]
+            gts = [(int(c), b[0], b[1], b[0] + b[2], b[1] + b[3]) for c, b in zip(g["cls"][keep], g["boxes"][keep])]
+            dets = [(b[0],) + _to_xyxy_px(b, W, H) + (b[5],)
+                    for b in nms_classwise(predict(model, img, a.conf, cmap))]
+            labels, found, why = classify_errors(gts, dets)
+            for lab in labels:
+                det_n[lab] += 1
+            for f, r, area, t in zip(found, why, g["area"][keep], g["t"][keep]):
+                miss_n["found" if f else f"missed_{r}"] += 1
+                for k, lo, hi in ERR_SIZE:
+                    if lo <= area < hi:
+                        by_size[k][0] += f
+                        by_size[k][1] += 1
+                if np.isfinite(t):
+                    for k, lo, hi in ERR_VIS:
+                        if lo <= t < hi:
+                            by_vis[k][0] += f
+                            by_vis[k][1] += 1
+
+        def rec(d):
+            return {k: {"recall": v[0] / v[1] if v[1] else None, "n_gt": v[1]} for k, v in d.items()}
+        n_det, n_gt = sum(det_n.values()), sum(miss_n.values())
+        out["models"][label] = {
+            "weights": w, "n_detections": n_det, "n_gt": n_gt,
+            "detections": dict(det_n), "ground_truth": dict(miss_n),
+            "precision": det_n["correct"] / n_det if n_det else None,
+            "recall": miss_n["found"] / n_gt if n_gt else None,
+            "recall_by_size": rec(by_size), "recall_by_transmittance": rec(by_vis)}
+        log(f"{label}: {dict(det_n)} | {dict(miss_n)}")
+    save_json(out, a.out / f"errors_{a.tag}.json")
+    log(f"wrote {a.out / f'errors_{a.tag}.json'}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("study", choices=["scale", "selection", "calibration", "agreement"])
+    ap.add_argument("study", choices=["scale", "selection", "calibration", "agreement", "errors"])
     ap.add_argument("--weights", default="yolov8n.pt")
-    ap.add_argument("--models", nargs="*", help="calibration: label=weights ...")
+    ap.add_argument("--models", nargs="*", help="calibration / errors: label=weights ...")
     ap.add_argument("--gt", type=Path)
     ap.add_argument("--img-root", type=Path)
     ap.add_argument("--data", type=Path, default=default_data_dir())
@@ -300,10 +401,10 @@ def main():
         from .common import find_base_teacher
         a.weights = find_base_teacher()
     a.out.mkdir(parents=True, exist_ok=True)
-    if a.study in ("scale", "selection", "calibration") and not (a.gt and a.img_root):
+    if a.study in ("scale", "selection", "calibration", "errors") and not (a.gt and a.img_root):
         ap.error(f"{a.study} needs --gt and --img-root")
     {"scale": study_scale, "selection": study_selection,
-     "calibration": study_calibration, "agreement": study_agreement}[a.study](a)
+     "calibration": study_calibration, "agreement": study_agreement, "errors": study_errors}[a.study](a)
 
 
 if __name__ == "__main__":

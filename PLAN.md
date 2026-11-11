@@ -304,3 +304,18 @@ value per GPU-hour:
 | 5 | Q1 mechanism runs, full Q2 ablation, seeds 1-2 for every primary pair | |
 | 6 | Fill and commit `ANALYSIS_PLAN.md`; held-out once | |
 
+### 10.10 Added 11 Nov 2026
+
+- **Third held-out set.** `prep` now keeps every Foggy Cityscapes image of the official validation
+  cities (Frankfurt, Lindau, Münster) out of training and writes `fcval_gt.json`. **This changes
+  `lists/train.txt`: re-run `prep` before any real run and commit the new `data/audit.json`**
+  (the committed one predates the change; the image and box totals of checkpoint 1 stay the same,
+  the per-split counts do not). Its labels come from the clear images, so it also contains
+  fog-hidden objects: report it overall and with `diagnose errors` by transmittance.
+- **`diagnose errors`**: for each model, every detection is correct / duplicate / wrong class /
+  mislocated / background, and every ground-truth box is found or missed, by size and transmittance.
+  This is the table that shows *what* a condition changed, not only that the score moved.
+- **Interval width** is printed in `tables.md` next to each comparison. Use it after block `week2`
+  to fix the equivalence margin in `ANALYSIS_PLAN.md`.
+- **`-Pilot`** on `run_experiments.ps1`, and `python -m wase.summarize` for a one-page status.
+

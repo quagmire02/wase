@@ -229,8 +229,22 @@ def check_crop_can_only_shrink():
     return f"crop refinement: re-detected box never larger than the raw box (max area ratio {worst:.3f} in 300 trials)"
 
 
+def check_error_breakdown():
+    from .diagnose import classify_errors
+    gts = [(2, 0, 0, 100, 100), (0, 200, 0, 240, 100), (4, 400, 0, 500, 100), (1, 600, 0, 640, 40)]
+    dets = [(2, 2, 2, 100, 100, 0.9),        # correct
+            (2, 0, 0, 98, 98, 0.8),          # duplicate of the car
+            (2, 200, 0, 240, 100, 0.7),      # the person, called a car
+            (4, 400, 0, 440, 100, 0.6),      # the bus, 40% covered
+            (0, 300, 300, 320, 340, 0.5)]    # nothing there
+    labels, found, why = classify_errors(gts, dets)
+    assert labels == ["correct", "duplicate", "wrong_class", "mislocated", "background"], labels
+    assert found == [True, False, False, False] and why == [None, "wrong_class", "mislocated", "unseen"], why
+    return "error breakdown: one label per detection, one fate per ground-truth box"
+
+
 def main():
-    checks = [check_ap_engine, check_bootstrap_weights, check_dqs_identity,
+    checks = [check_error_breakdown, check_ap_engine, check_bootstrap_weights, check_dqs_identity,
               check_transmittance, check_class_maps, check_verify_rule, check_oracles,
               check_seed_bootstrap, check_crop_can_only_shrink]
     failed = 0

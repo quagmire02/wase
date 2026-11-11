@@ -60,14 +60,17 @@ def load_gt(path):
             skipped += 1
             continue
         x, y, w, h = an["bbox"]
-        rows[an["image_id"]].append((x, y, w, h, c, an.get("area", w * h), bool(an.get("iscrowd", 0))))
+        t = an.get("transmittance")
+        rows[an["image_id"]].append((x, y, w, h, c, an.get("area", w * h), bool(an.get("iscrowd", 0)),
+                                     np.nan if t is None else t))
     gt = {}
     for iid in files:
         r = rows.get(iid, [])
         arr = np.array([t[:4] for t in r], float).reshape(-1, 4)
         gt[iid] = {"boxes": arr, "cls": np.array([t[4] for t in r], int),
                    "area": np.array([t[5] for t in r], float),
-                   "crowd": np.array([t[6] for t in r], bool)}
+                   "crowd": np.array([t[6] for t in r], bool),
+                   "t": np.array([t[7] for t in r], float)}
     return gt, files, {"format": "ours" if ours else "acdc/cityscapes", "skipped_annotations": skipped}
 
 
@@ -279,13 +282,16 @@ def report(results):
         tex.append("\\bottomrule\\end{tabular}\n")
         deltas = r.get("bootstrap", {}).get("deltas", {})
         if deltas:
-            md.append("\n| comparison (mAP50) | observed Δ | bootstrap mean Δ | 95% CI | p | equivalence (90% CI within ±margin) |")
-            md.append("|---|:-:|:-:|:-:|:-:|:-:|")
+            md.append("\n| comparison (mAP50) | observed Δ | bootstrap mean Δ | 95% CI | CI half-width | p | equivalence (90% CI within ±margin) |")
+            md.append("|---|:-:|:-:|:-:|:-:|:-:|:-:|")
             for k, d in deltas.items():
                 eq = d.get("tost")
                 eq_txt = "--" if not eq else f"{'yes' if eq['equivalent'] else 'no'} (±{eq['margin']})"
                 md.append(f"| {k} | {d['observed']:+.4f} | {d['mean']:+.4f} | [{d['ci95'][0]:+.4f}, {d['ci95'][1]:+.4f}] | "
+                          f"{(d['ci95'][1] - d['ci95'][0]) / 2:.4f} | "
                           f"{d['p_two_sided']:.3f} | {eq_txt} |")
+    md.append("\nCI half-width is the smallest difference this test set can resolve for that pair. "
+              "An equivalence margin smaller than it can only ever return 'inconclusive'.")
     (results / "tables.md").write_text("\n".join(md) + "\n", encoding="utf-8")
     (results / "tables.tex").write_text("\n".join(tex) + "\n", encoding="utf-8")
     log(f"wrote {results / 'tables.md'} and {results / 'tables.tex'}")
